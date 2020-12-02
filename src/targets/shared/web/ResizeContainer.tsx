@@ -104,7 +104,7 @@ function ResizeContainerComponent(props: ResizeContainerProps) {
 
   // Render the canvas into the dom
   return (
-    <div ref={mergeRefs([useMeasureRef, containerRef])} style={memoStyle} {...events} {...restSpread}>
+    <div ref={containerRef} style={memoStyle} {...events} {...restSpread}>
       {preRender}
       {ready && <Content {...props} {...state} />}
     </div>
