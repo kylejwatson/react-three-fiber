@@ -1,10 +1,12 @@
 import * as THREE from 'three'
-import React from 'react'
+import * as React from 'react'
 // @ts-ignore
-//import Reconciler from 'react-reconciler'
-import Reconciler from 'react-reconciler/cjs/react-reconciler.production.min'
+import Reconciler from 'react-reconciler'
+// @ts-ignore
+//import Reconciler from 'react-reconciler/cjs/react-reconciler.production.min'
 import { unstable_now as now, unstable_IdlePriority as idlePriority, unstable_runWithPriority as run } from 'scheduler'
 import { CanvasContext } from './canvas'
+import { name, version } from '../package.json'
 
 export type GlobalRenderCallback = (timeStamp: number) => boolean
 
@@ -76,7 +78,8 @@ export function renderGl(
   state.current.frames = Math.max(0, state.current.frames - 1)
   repeat += !state.current.invalidateFrameloop ? 1 : state.current.frames
   // Render content
-  if (!state.current.manual) state.current.gl.render(state.current.scene, state.current.camera)
+  if (!state.current.manual && state.current.gl.render)
+    state.current.gl.render(state.current.scene, state.current.camera)
 
   // Run global after-effects
   if (runGlobalEffects) {
@@ -129,12 +132,15 @@ function renderLoop(timestamp: number) {
   running = false
 }
 
-export function invalidate(state: React.MutableRefObject<CanvasContext> | boolean = true, frames = 2) {
+export function invalidate(state: React.MutableRefObject<CanvasContext> | boolean = true, frames = 1): void {
   if (state === true) {
-    roots.forEach((root) => (root.containerInfo.__state.current.frames = frames))
+    roots.forEach((root) => {
+      const state = root.containerInfo.__state
+      state.current.frames = state.current.ready ? state.current.frames + frames : frames
+    })
   } else if (state && state.current) {
     if (state.current.vr) return
-    state.current.frames = frames
+    state.current.frames = state.current.ready ? state.current.frames + frames : frames
   }
   if (!running) {
     running = true
@@ -142,7 +148,7 @@ export function invalidate(state: React.MutableRefObject<CanvasContext> | boolea
   }
 }
 
-export function forceResize() {
+export function forceResize(): void {
   roots.forEach((root) => root.containerInfo.__state.current.forceResize())
 }
 
@@ -228,7 +234,7 @@ export function applyProps(instance: any, newProps: any, oldProps: any = {}, acc
           }
         }
         // Special treatment for objects with support for set/copy
-        const isColorManagement = instance.__container?.__state.current.colorManagement
+        const isColorManagement = instance.__container?.__state?.current.colorManagement
         if (target && target.set && (target.copy || target instanceof THREE.Layers)) {
           // If value is an array it has got to be the set function
           if (Array.isArray(value)) {
@@ -247,7 +253,6 @@ export function applyProps(instance: any, newProps: any, oldProps: any = {}, acc
           // https://github.com/react-spring/react-three-fiber/issues/274
           else if (value !== undefined) {
             target.set(value)
-
             // Auto-convert sRGB colors, for now ...
             // https://github.com/react-spring/react-three-fiber/issues/344
             if (isColorManagement && target instanceof THREE.Color) {
@@ -257,14 +262,12 @@ export function applyProps(instance: any, newProps: any, oldProps: any = {}, acc
           // Else, just overwrite the value
         } else {
           root[key] = value
-
           // Auto-convert sRGB textures, for now ...
           // https://github.com/react-spring/react-three-fiber/issues/344
           if (isColorManagement && root[key] instanceof THREE.Texture) {
             root[key].encoding = THREE.sRGBEncoding
           }
         }
-
         invalidateInstance(instance)
       }
     })
@@ -278,8 +281,7 @@ export function applyProps(instance: any, newProps: any, oldProps: any = {}, acc
 
     // Prep interaction handlers
     if (handlers.length) {
-      // Add interactive object to central container
-      if (container && instance.raycast) container.__interaction.push(instance)
+      if (accumulative && container && instance.raycast) container.__interaction.push(instance)
       // Add handlers to the instances handler-map
       instance.__handlers = handlers.reduce((acc, key) => {
         acc[key.charAt(2).toLowerCase() + key.substr(3)] = newProps[key]
@@ -314,13 +316,11 @@ function createInstance(
     instance = props.object
     instance.__instance = true
     instance.__dispose = instance.dispose
-  } else if (type === 'new') {
-    instance = new props.object(args)
   } else {
     const target = (catalogue as any)[name] || (THREE as any)[name]
 
     if (!target) {
-      throw `"${name}" is not part of the THREE namespace! Did you forget to extend it? See: https://github.com/react-spring/react-three-fiber/blob/master/api.md#putting-already-existing-objects-into-the-scene-graph`
+      throw `"${name}" is not part of the THREE namespace! Did you forget to extend it? See: https://github.com/pmndrs/react-three-fiber/blob/master/markdown/api.md#using-3rd-party-objects-declaratively`
     }
 
     instance = is.arr(args) ? new target(...args) : new target(args)
@@ -355,12 +355,12 @@ function createInstance(
 
   // It should NOT call onUpdate on object instanciation, because it hasn't been added to the
   // view yet. If the callback relies on references for instance, they won't be ready yet, this is
-  // why it passes "false" here
+  // why it passes "true" here
   applyProps(instance, props, {})
   return instance
 }
 
-function appendChild(parentInstance: any, child: any) {
+function appendChild(parentInstance: any, child: any): void {
   if (child) {
     if (child.isObject3D) {
       parentInstance.add(child)
@@ -383,7 +383,7 @@ function appendChild(parentInstance: any, child: any) {
   }
 }
 
-function insertBefore(parentInstance: any, child: any, beforeChild: any) {
+function insertBefore(parentInstance: any, child: any, beforeChild: any): void {
   if (child) {
     if (child.isObject3D) {
       child.parent = parentInstance
@@ -400,7 +400,7 @@ function insertBefore(parentInstance: any, child: any, beforeChild: any) {
   }
 }
 
-function removeRecursive(array: any, parent: any, clone = false) {
+function removeRecursive(array: any, parent: any, clone = false): void {
   if (array) {
     // Three uses splice op's internally we may have to shallow-clone the array in order to safely remove items
     const target = clone ? [...array] : array
@@ -408,7 +408,7 @@ function removeRecursive(array: any, parent: any, clone = false) {
   }
 }
 
-function removeChild(parentInstance: any, child: any) {
+function removeChild(parentInstance: any, child: any): void {
   if (child) {
     if (child.isObject3D) {
       parentInstance.remove(child)
@@ -424,20 +424,20 @@ function removeChild(parentInstance: any, child: any) {
         parentInstance[child.attach] = null
       }
     }
+
+    // Remove interactivity
+    if (child.__container)
+      child.__container.__interaction = child.__container.__interaction.filter((x: any) => x !== child)
     invalidateInstance(child)
 
     // Allow objects to bail out of recursive dispose alltogether by passing dispose={null}
     if (child.dispose !== null) {
       run(idlePriority, () => {
-        // Remove interactivity
-        if (child.__container) {
-          child.__container.__interaction = child.__container.__interaction.filter((x: any) => x !== child)
-        }
         // Remove nested child objects
         removeRecursive(child.__objects, child)
         removeRecursive(child.children, child, true)
         // Dispose item
-        if (child.dispose) child.dispose()
+        if (child.dispose && child.type !== 'Scene') child.dispose()
         else if (child.__dispose) child.__dispose()
         // Remove references
         delete child.__container
@@ -447,7 +447,7 @@ function removeChild(parentInstance: any, child: any) {
   }
 }
 
-function switchInstance(instance: any, type: string, newProps: any, fiber: Reconciler.Fiber) {
+function switchInstance(instance: any, type: string, newProps: any, fiber: Reconciler.Fiber): void {
   const parent = instance.parent
   const newInstance = createInstance(type, newProps, instance.__container, null, fiber)
   removeChild(parent, instance)
@@ -466,21 +466,33 @@ function switchInstance(instance: any, type: string, newProps: any, fiber: Recon
   })
 }
 
+// TODO: Here we need to provide types to generic
+//   Reconciler<
+//    Type,
+//    Props,
+//    Container,
+//    Instance,
+//    TextInstance,
+//    HydratableInstance,
+//    PublicInstance,
+//    HostContext,
+//    UpdatePayload,
+//    ChildSet,
+//    TimeoutHandle,
+//    NoTimeout
+//  >
 const Renderer = Reconciler({
   now,
   createInstance,
   removeChild,
   appendChild,
   insertBefore,
-  // @ts-ignore
   warnsIfNotActing: true,
   supportsMutation: true,
   isPrimaryRenderer: false,
   scheduleTimeout: is.fun(setTimeout) ? setTimeout : undefined,
   cancelTimeout: is.fun(clearTimeout) ? clearTimeout : undefined,
-  // @ts-ignore
   setTimeout: is.fun(setTimeout) ? setTimeout : undefined,
-  // @ts-ignore
   clearTimeout: is.fun(clearTimeout) ? clearTimeout : undefined,
   noTimeout: -1,
   appendInitialChild: appendChild,
@@ -537,8 +549,16 @@ const Renderer = Reconciler({
     return emptyObject
   },
   createTextInstance() {},
-  finalizeInitialChildren() {
-    return false
+  finalizeInitialChildren(instance: any) {
+    // https://github.com/facebook/react/issues/20271
+    // Returning true will trigger commitMount
+    return instance.__handlers
+  },
+  commitMount(instance: any /*, type, props*/) {
+    // https://github.com/facebook/react/issues/20271
+    // This will make sure events are only added once to the central container
+    const container = instance.__container
+    if (container && instance.raycast && instance.__handlers) container.__interaction.push(instance)
   },
   prepareUpdate() {
     return emptyObject
@@ -611,8 +631,8 @@ Renderer.injectIntoDevTools({
   bundleType: process.env.NODE_ENV === 'production' ? 0 : 1,
   //@ts-ignore
   findHostInstanceByFiber: () => null,
-  version: React.version,
-  rendererPackageName: 'react-three-fiber',
+  version: version,
+  rendererPackageName: name,
 })
 
 export { Renderer }

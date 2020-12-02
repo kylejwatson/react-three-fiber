@@ -1,6 +1,7 @@
 # API
 
 ## Table of Contents
+
 - [Canvas](#canvas)
 - [Objects and properties](#objects-and-properties)
 - [Automatic disposal](#automatic-disposal)
@@ -11,6 +12,7 @@
   - [useResource](#useResource)
   - [useUpdate](#useUpdate)
   - [useLoader](#useloader)
+  - [useGraph](#useGraph)
 - [Additional exports](#additional-exports)
 - [Gotchas](#gotchas)
 
@@ -77,7 +79,7 @@ A default _shadowMap_ if Canvas.shadowMap is true: `type: PCFSoftShadowMap`
 
 A default _scene_ (into which all the JSX is rendered) and a _raycaster_.
 
-A _wrapping container_ with a [resize observer](https://github.com/react-spring/react-use-measure): `scroll: true, debounce: { scroll: 50, resize: 0 }`
+A _wrapping container_ with a [resize observer](https://github.com/react-spring/react-use-measure): `scroll: true, debounce: { scroll: 50, resize: 0 }`. It does not polyfill it. Use [@juggle/resize-observer](https://github.com/juggle/resize-observer) if you must.
 
 You do not have to use any of these objects, look under "Recipes" down below if you want to bring your own.
 
@@ -111,11 +113,11 @@ The problem is that all of these properties will always be re-created. Instead, 
 
 All properties whose underlying object has a `.set()` method can directly receive the same arguments that `set` would otherwise take. For example [THREE.Color.set](https://threejs.org/docs/index.html#api/en/math/Color.set) can take a color string, so instead of `color={new THREE.Color('hotpink')}` you can simply write `color="hotpink"`. Some `set` methods take multiple arguments, for instance [THREE.Vector3](https://threejs.org/docs/index.html#api/en/math/Vector3.set), give it an array in that case `position={[100, 0, 0]}`.
 
-#### Attaching and dealing with non-Object3D's
+#### Dealing with objects that are normally not part of the scene, and attaching
 
-**New in v5**, all elements ending with "Material" receive `attach="material"`, and all elements ending with "Geometry" receive `attach="geometry"` automatically. Of course you can still overwrite it, but it isn't necessary to type out any longer.
+You can put non-Object3D primitives (geometries, materials, etc) into the render tree as well, so that they become managed and reactive. They are not part of the threejs scene! They take the same properties they normally would, constructor arguments are passed as an array via `args`. If args change later on, the object gets re-constructed from scratch!
 
-Using the `attach` property objects bind to their parent and are taken off once they unmount. You can put non-Object3D primitives (geometries, materials, etc) into the render tree as well, so that they become managed and reactive. They take the same properties they normally would, constructor arguments are passed as an array via `args`. If args change later on, the object gets re-constructed from scratch!
+Using the `attach` property objects bind to their parent and are taken off once they unmount.
 
 You can nest primitive objects, too:
 
@@ -140,6 +142,14 @@ You can also attach to named parent properties using `attachObject={[target, nam
   <bufferAttribute attachObject={['attributes', 'position']} count={v.length / 3} array={v} itemSize={3} />
 ```
 
+**New in v5**, all elements ending with "Material" receive `attach="material"`, and all elements ending with "Geometry" receive `attach="geometry"` automatically. Of course you can still overwrite it, but it isn't necessary to type out any longer.
+
+```jsx
+<mesh>
+  <meshBasicMaterial />
+  <boxBufferGeometry />
+```
+
 #### Piercing into nested properties
 
 If you want to reach into nested attributes (for instance: `mesh.rotation.x`), just use dash-case.
@@ -153,7 +163,7 @@ If you want to reach into nested attributes (for instance: `mesh.rotation.x`), j
 You can use the `primitive` placeholder for that. You can still give it properties or attach nodes to it. Never add the same object multiple times, this is not allowed in Threejs!
 
 ```jsx
-const mesh = useMemo(() => new THREE.Mesh(), [])
+const mesh = React.useMemo(() => new THREE.Mesh(), [])
 return <primitive object={mesh} position={[0, 0, 0]} />
 ```
 
@@ -208,8 +218,8 @@ Also notice the `onPointerMissed` on the canvas element, which fires on clicks t
   onPointerDown={(e) => console.log('down')}
   onPointerOver={(e) => console.log('over')}
   onPointerOut={(e) => console.log('out')}
-  onPointerEnter={(e) => console.log('enter')}
-  onPointerLeave={(e) => console.log('leave')}
+  onPointerEnter={(e) => console.log('enter')} // see note 1
+  onPointerLeave={(e) => console.log('leave')} // see note 1
   onPointerMove={(e) => console.log('move')}
   onUpdate={(self) => console.log('props have been updated')}
 />
@@ -220,8 +230,8 @@ Also notice the `onPointerMissed` on the canvas element, which fires on clicks t
 ```jsx
 ({
   ...DomEvent                   // All the original event data
-  ...ThreeEvent                 // All of Three's intersection data
-  intersections: Intersect[]    // All intersections
+  ...Intersection                 // All of Three's intersection data - see note 2
+  intersections: Intersection[]    // The first intersection of each intersected object
   object: Object3D              // The object that was actually hit
   eventObject: Object3D         // The object that registered the event
   unprojectedPoint: Vector3     // Camera-unprojected point
@@ -232,21 +242,52 @@ Also notice the `onPointerMissed` on the canvas element, which fires on clicks t
 }) => ...
 ```
 
-#### Propagation and capturing
+<details>
+<summary>How the event-system works, bubbling and capture</summary>
+  
+Note 1: the pointerenter and pointerleave events work exactly the same as pointerover and pointerout. The pointerenter and pointerleave semantics are not implemented.
+
+Note 2: Some events (such as pointerout) happen when there is no intersection between `eventObject` and the ray. When this happens, the event will contain intersection data from a previous event with this object.
+
+#### Event propagation (bubbling)
+
+Propagation works a bit differently to the DOM because objects can occlude each other in 3D. The `intersections` array in the event includes all objects intersecting the ray, not just the nearest. Only the first intersection with each object is included.
+The event is first delivered to the object nearest the camera, and then bubbles up through its ancestors like in the DOM. After that, it is delivered to the next nearest object, and then its ancestors, and so on. This means objects are transparent to pointer events by default, even if the object handles the event.
+
+`event.stopPropagation()` doesn't just stop this event from bubbling up, it also stops it from being delivered to farther objects (objects behind this one). All other objects, nearer or farther, no longer count as being hit while the pointer is over this object. If they were previously delivered pointerover events, they will immediately be delivered pointerout events. If you want an object to block pointer events from objects behind it, it needs to have an event handler as follows:
 
 ```jsx
-  onPointerDown={e => {
-    // Only the mesh closest to the camera will be processed
-    e.stopPropagation()
-    // You may optionally capture the target
-    e.target.setPointerCapture(e.pointerId)
-  }}
-  onPointerUp={e => {
-    e.stopPropagation()
-    // Optionally release capture
-    e.target.releasePointerCapture(e.pointerId)
-  }}
+onPointerOver={e => {
+  e.stopPropagation()
+  // ...
+}}
 ```
+
+even if you don't want this object to respond to the pointer event. If you do want to handle the event as well as using `stopPropagation()`, remember that the pointerout events will happen **during** the `stopPropagation()` call. You probably want your other event handling to happen after this.
+
+#### Pointer capture
+
+Because events go to all intersected objects, capturing the pointer also works differently. In the DOM, the capturing object **replaces** the hit test, but in React-Three-Fiber, the capturing object is **added** to the hit test result: if the capturing object was not hit, then all of the hit objects (and their ancestors) get the event first, followed by the capturing object and its ancestors. The capturing object can also use `event.stopPropagation()` so that objects that really were hit get pointerout events.
+
+Note that you can access the `setPointerCapture` and `releasePointerCapture` methods **only** via `event.target`: they don't get added to the `Object3D` instances in the scene graph.
+
+`setPointerCapture` and `releasePointerCapture` take a `pointerId` parameter like in the DOM, but for now they don't have support for multiple active pointers. PRs are welcome!
+
+```jsx
+onPointerDown={e => {
+  // Only the mesh closest to the camera will be processed
+  e.stopPropagation()
+  // You may optionally capture the target
+  e.target.setPointerCapture(e.pointerId)
+}}
+onPointerUp={e => {
+  e.stopPropagation()
+  // Optionally release capture
+  e.target.releasePointerCapture(e.pointerId)
+}}
+```
+
+</details>
 
 # Hooks
 
@@ -323,19 +364,24 @@ forceResize()
 useFrame((callback: (state, delta) => void), (renderPriority: number = 0))
 ```
 
-This hook calls you back every frame, which is good for running effects, updating controls, etc. You receive the state (same as useThree) and a clock delta. If you supply a render priority greater than zero it will switch off automatic rendering entirely, you can then control rendering yourself. If you have multiple frames with a render priority then they are ordered highest priority last, similar to the web's z-index. Frames are managed, three-fiber will remove them automatically when the component that holds them is unmounted.
-
-Updating controls:
+Allows you to execute code on every frame rendered, like running effects, updating controls, and so on. You receive the state (same as `useThree`) and a clock delta. Your callback function will be invoked just before a frame is rendered.
 
 ```jsx
 import { useFrame } from 'react-three-fiber'
 
-const controls = useRef()
-useFrame((state) => controls.current.update())
-return <orbitControls ref={controls} />
+const Controls = () => {
+  const controls = useRef()
+  
+  /* Invoke the OrbitControls' update function on every frame */
+  useFrame(() => controls.current.update())
+  
+  return <orbitControls ref={controls} />
+}
 ```
 
-Taking over the render-loop:
+If you need more control over the order in which `useFrame` callbacks are executed (and frames are rendered), you may pass a numerical `renderPriority` value; callbacks will be executed in order of ascending priority values (lowest first, highest last.)
+
+Using a non-zero render priority will cause react-three-fiber to disable its automatic rendering, and it will be your responsibility to render explicitly:
 
 ```jsx
 useFrame(({ gl, scene, camera }) => gl.render(scene, camera), 1)
@@ -385,7 +431,7 @@ return <bufferGeometry ref={ref} />
 #### useLoader
 
 ```jsx
-useLoader(loader, url: string | string[], extensions?, xhr?)
+useLoader(loader: THREE.Loader, url: string | string[], extensions?, xhr?)
 ```
 
 This hook loads assets and suspends for easier fallback- and error-handling.
@@ -421,6 +467,32 @@ It can also make multiple requests in parallel:
 
 ```jsx
 const [bumpMap, specMap, normalMap] = useLoader(TextureLoader, [url1, url2, url2])
+```
+
+<details>
+<summary>Special treatment of GLTFLoaders and all loaders that return a `scene` props.</summary>
+
+If a data.scene prop is found the hook will automatically create a named object/material collection: nodes and materials. You might want use more for finegrained control of the loader-data. It lets you build immutable scene graphs selectively. You can also specifically alter the data without having to traverse it. The [gltfjsx](https://github.com/pmndrs/gltfjsx) specifically relies on this data.
+
+```jsx
+const { nodes, material } = useLoader(GLTFLoader, url)
+```
+
+</details>
+
+#### useGraph
+
+```jsx
+const { nodes, materials } = useGraph(object: THREE.Object3D)
+```
+
+Convenience hook which creates a memoized, named object/material collection from any Object3D.
+
+```jsx
+function Asset({ url }) {
+  const scene = useLoader(OBJLoader, url)
+  const { nodes, materials } = useGraph(scene)
+  return <mesh geometry={nodes.robot.geometry} material={materials.metal} />
 ```
 
 # Additional exports

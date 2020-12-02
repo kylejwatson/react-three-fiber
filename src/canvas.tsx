@@ -1,8 +1,9 @@
 import * as THREE from 'three'
-import React, { useMemo, useRef, useEffect, useState, useCallback, createContext, useLayoutEffect } from 'react'
+import * as React from 'react'
 import { render, invalidate, applyProps, unmountComponentAtNode, renderGl } from './renderer'
 import { TinyEmitter } from 'tiny-emitter'
-import { NamedArrayTuple, ReactThreeFiber } from './three-types'
+import { NamedArrayTuple } from './three-types'
+import { ReactThreeFiber } from '.'
 import { RectReadOnly } from 'react-use-measure'
 
 export type Camera = THREE.OrthographicCamera | THREE.PerspectiveCamera
@@ -79,6 +80,7 @@ export type CanvasContext = SharedCanvasContext & {
 }
 
 export type FilterFunction = (items: THREE.Intersection[], state: SharedCanvasContext) => THREE.Intersection[]
+export type ComputeOffsetsFunction = (event: DomEvent) => { offsetX: number; offsetY: number }
 
 export type ResizeOptions = {
   debounce?: number | { scroll: number; resize: number }
@@ -103,7 +105,7 @@ export interface CanvasProps {
       ReactThreeFiber.Object3DNode<THREE.PerspectiveCamera, typeof THREE.PerspectiveCamera> &
       ReactThreeFiber.Object3DNode<THREE.OrthographicCamera, typeof THREE.OrthographicCamera>
   >
-  raycaster?: Partial<THREE.Raycaster> & { filter?: FilterFunction }
+  raycaster?: Partial<THREE.Raycaster> & { filter?: FilterFunction; computeOffsets?: ComputeOffsetsFunction }
   pixelRatio?: number | [number, number]
   onCreated?: (props: CanvasContext) => Promise<any> | void
   onPointerMissed?: () => void
@@ -128,13 +130,13 @@ export type DomEventHandlers = {
   onLostPointerCapture(e: any): void
 }
 
-function makeId(event: DomEvent) {
+function makeId(event: DomEvent): string {
   return (event.eventObject || event.object).uuid + '/' + event.index
 }
 
-export const stateContext = createContext<SharedCanvasContext>({} as SharedCanvasContext)
+export const stateContext = React.createContext<SharedCanvasContext>({} as SharedCanvasContext)
 
-export const useCanvas = (props: UseCanvasProps): DomEventHandlers => {
+export function useCanvas(props: UseCanvasProps): DomEventHandlers {
   const {
     children,
     gl,
@@ -156,26 +158,26 @@ export const useCanvas = (props: UseCanvasProps): DomEventHandlers => {
   } = props
 
   // Local, reactive state
-  const [ready, setReady] = useState(false)
-  const [mouse] = useState(() => new THREE.Vector2())
+  const [ready, setReady] = React.useState(false)
+  const [mouse] = React.useState(() => new THREE.Vector2())
 
-  const [defaultRaycaster] = useState(() => {
+  const [defaultRaycaster] = React.useState(() => {
     const ray = new THREE.Raycaster()
     if (raycaster) {
-      const { filter, ...raycasterProps } = raycaster
+      const { filter, computeOffsets, ...raycasterProps } = raycaster
       applyProps(ray, raycasterProps, {})
     }
     return ray
   })
 
-  const [defaultScene] = useState(() => {
+  const [defaultScene] = React.useState(() => {
     const scene = new THREE.Scene()
     ;(scene as any).__interaction = []
     ;(scene as any).__objects = []
     return scene
   })
 
-  const [defaultCam, setDefaultCamera] = useState(() => {
+  const [defaultCam, setDefaultCamera] = React.useState(() => {
     const cam = orthographic
       ? new THREE.OrthographicCamera(0, 0, 0, 0, 0.1, 1000)
       : new THREE.PerspectiveCamera(75, 0, 0.1, 1000)
@@ -186,10 +188,10 @@ export const useCanvas = (props: UseCanvasProps): DomEventHandlers => {
     return cam
   })
 
-  const [clock] = useState(() => new THREE.Clock())
+  const [clock] = React.useState(() => new THREE.Clock())
 
   // Public state
-  const state: React.MutableRefObject<CanvasContext> = useRef<CanvasContext>({
+  const state: React.MutableRefObject<CanvasContext> = React.useRef<CanvasContext>({
     ready: false,
     active: true,
     manual: 0,
@@ -239,7 +241,7 @@ export const useCanvas = (props: UseCanvasProps): DomEventHandlers => {
     forceResize,
   })
 
-  const getCurrentViewport = useCallback(
+  const getCurrentViewport = React.useCallback(
     (camera: Camera = state.current.camera, target: THREE.Vector3 = new THREE.Vector3(0, 0, 0)) => {
       const { width, height } = state.current.size
       const distance = camera.position.distanceTo(target)
@@ -256,7 +258,7 @@ export const useCanvas = (props: UseCanvasProps): DomEventHandlers => {
   )
 
   // Writes locals into public state for distribution among subscribers, context, etc
-  useMemo(() => {
+  React.useMemo(() => {
     state.current.ready = ready
     state.current.size = size
     state.current.camera = defaultCam
@@ -267,15 +269,15 @@ export const useCanvas = (props: UseCanvasProps): DomEventHandlers => {
     state.current.noEvents = noEvents
     // Make viewport backwards compatible
     state.current.viewport = getCurrentViewport as ViewportData
-  }, [invalidateFrameloop, vr, concurrent, noEvents, ready, size, defaultCam, gl])
+  }, [invalidateFrameloop, vr, concurrent, noEvents, ready, size, defaultCam, gl, getCurrentViewport])
 
   // Adjusts default camera
-  useMemo(() => {
+  React.useMemo(() => {
     state.current.aspect = size.width / size.height
     // Assign viewport props to the function
     Object.assign(state.current.viewport, getCurrentViewport())
 
-    // #92 (https://github.com/drcmda/react-three-fiber/issues/92)
+    // https://github.com/drcmda/react-three-fiber/issues/92
     // Sometimes automatic default camera adjustment isn't wanted behaviour
     if (updateDefaultCamera) {
       if (isOrthographicCamera(defaultCam)) {
@@ -288,7 +290,7 @@ export const useCanvas = (props: UseCanvasProps): DomEventHandlers => {
       }
       defaultCam.updateProjectionMatrix()
 
-      // #178: https://github.com/react-spring/react-three-fiber/issues/178
+      // https://github.com/react-spring/react-three-fiber/issues/178
       // Update matrix world since the renderer is a frame late
       defaultCam.updateMatrixWorld()
     }
@@ -296,21 +298,29 @@ export const useCanvas = (props: UseCanvasProps): DomEventHandlers => {
     gl.setSize(size.width, size.height)
 
     if (ready) invalidate(state)
-  }, [defaultCam, gl, size, updateDefaultCamera])
+  }, [defaultCam, gl, size, updateDefaultCamera, getCurrentViewport, ready])
 
   /** Events ------------------------------------------------------------------------------------------------ */
 
+  const hovered = React.useMemo(() => new Map<string, DomEvent>(), [])
+  const temp = new THREE.Vector3()
+
   /** Sets up defaultRaycaster */
-  const prepareRay = useCallback(({ clientX, clientY }) => {
-    if (clientX !== void 0) {
-      const { left, right, top, bottom } = state.current.size
-      mouse.set(((clientX - left) / (right - left)) * 2 - 1, -((clientY - top) / (bottom - top)) * 2 + 1)
+  const prepareRay = React.useCallback((event: DomEvent) => {
+    // https://github.com/pmndrs/react-three-fiber/pull/782
+    // Events trigger outside of canvas when moved
+    const offsets = raycaster?.computeOffsets?.(event) || event.nativeEvent
+    if (offsets) {
+      const { offsetX, offsetY } = offsets
+      const { width, height } = state.current.size
+      mouse.set((offsetX / width) * 2 - 1, -(offsetY / height) * 2 + 1)
       defaultRaycaster.setFromCamera(mouse, state.current.camera)
     }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [])
 
   /** Intersects interaction objects using the event input */
-  const intersect = useCallback(
+  const intersect = React.useCallback(
     (event: DomEvent, filter?: (objects: THREE.Object3D[]) => THREE.Object3D[]): Intersection[] => {
       // Skip event handling when noEvents is set
       if (state.current.noEvents) return []
@@ -331,7 +341,7 @@ export const useCanvas = (props: UseCanvasProps): DomEventHandlers => {
         return true
       })
 
-      // #16031: (https://github.com/mrdoob/three.js/issues/16031)
+      // https://github.com/mrdoob/three.js/issues/16031
       // Allow custom userland intersect sort order
       if (raycaster && raycaster.filter && sharedState.current) {
         intersects = raycaster.filter(intersects, sharedState.current)
@@ -348,22 +358,21 @@ export const useCanvas = (props: UseCanvasProps): DomEventHandlers => {
       }
       return hits
     },
+    // eslint-disable-next-line react-hooks/exhaustive-deps
     []
   )
 
   /**  Calculates click deltas */
-  const calculateDistance = useCallback((event: DomEvent) => {
-    const dx = event.clientX - state.current.initialClick[0]
-    const dy = event.clientY - state.current.initialClick[1]
+  const calculateDistance = React.useCallback((event: DomEvent) => {
+    const dx = event.nativeEvent.offsetX - state.current.initialClick[0]
+    const dy = event.nativeEvent.offsetY - state.current.initialClick[1]
     return Math.round(Math.sqrt(dx * dx + dy * dy))
   }, [])
 
-  const hovered = useMemo(() => new Map<string, DomEvent>(), [])
-
-  const handlePointerCancel: any = useCallback((event: DomEvent, hits?: Intersection[], prepare = true) => {
+  const handlePointerCancel: any = React.useCallback((event: DomEvent, hits?: Intersection[], prepare = true) => {
     state.current.pointer.emit('pointerCancel', event)
     if (prepare) prepareRay(event)
-    // commenting this out as I believe it is unneccessary and causes a recursive dependency
+    // commenting this out as I believe it is unnecessary and causes a recursive dependency
     // if (!hits) hits = handleIntersects(event, () => null)
     Array.from(hovered.values()).forEach((data) => {
       // When no objects were hit or the the hovered object wasn't found underneath the cursor
@@ -371,23 +380,19 @@ export const useCanvas = (props: UseCanvasProps): DomEventHandlers => {
       if (hits && (!hits.length || !hits.find((i) => i.eventObject === data.eventObject))) {
         const eventObject = data.eventObject
         const handlers = (eventObject as any).__handlers
+        hovered.delete(makeId(data))
         if (handlers) {
           if (handlers.pointerOut) handlers.pointerOut({ ...data, type: 'pointerout' })
           if (handlers.pointerLeave) handlers.pointerLeave({ ...data, type: 'pointerleave' })
         }
-        hovered.delete(makeId(data))
       }
     })
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [])
 
-  /**  Handles intersections by forwarding them to handlers */
-  const temp = new THREE.Vector3()
-  const handleIntersects = useCallback(
-    (
-      event: DomEvent,
-      fn: (event: DomEvent) => void,
-      filter?: (objects: THREE.Object3D[]) => THREE.Object3D[]
-    ): Intersection[] => {
+  /**  Creates filtered intersects and returns an array of positive hits */
+  const getIntersects = React.useCallback(
+    (event: DomEvent, filter?: (objects: THREE.Object3D[]) => THREE.Object3D[]): Intersection[] => {
       // Get fresh intersects
       const intersections: Intersection[] = intersect(event, filter)
       // If the interaction is captured take that into account, the captured event has to be part of the intersects
@@ -396,15 +401,21 @@ export const useCanvas = (props: UseCanvasProps): DomEventHandlers => {
           if (!intersections.find((hit) => hit.eventObject === captured.eventObject)) intersections.push(captured)
         })
       }
+      return intersections
+    },
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    []
+  )
+
+  /**  Handles intersections by forwarding them to handlers */
+  const handleIntersects = React.useCallback(
+    (intersections: Intersection[], event: DomEvent, fn: (event: DomEvent) => void): Intersection[] => {
       // If anything has been found, forward it to the event listeners
       if (intersections.length) {
         const unprojectedPoint = temp.set(mouse.x, mouse.y, 0).unproject(state.current.camera)
         const delta = event.type === 'click' ? calculateDistance(event) : 0
         const releasePointerCapture = (id: any) => (event.target as any).releasePointerCapture(id)
-        const localState = {
-          stopped: false,
-          captured: false,
-        }
+        const localState = { stopped: false, captured: false }
 
         for (const hit of intersections) {
           const setPointerCapture = (id: any) => {
@@ -438,6 +449,13 @@ export const useCanvas = (props: UseCanvasProps): DomEventHandlers => {
               const cap = state.current.captured
               if (!cap || cap.find((h) => h.eventObject.id === hit.eventObject.id)) {
                 raycastEvent.stopped = localState.stopped = true
+                // Propagation is stopped, remove all other hover records
+                // An event handler is only allowed to flush other handlers if it is hovered itself
+                if (hovered.size && Array.from(hovered.values()).find((i) => i.object === hit.object)) {
+                  // Objects cannot flush out higher up objects that have already caught the event
+                  const higher = intersections.slice(0, intersections.indexOf(hit))
+                  handlePointerCancel(raycastEvent, [...higher, hit])
+                }
               }
             },
             target: { ...event.target, setPointerCapture, releasePointerCapture },
@@ -446,67 +464,63 @@ export const useCanvas = (props: UseCanvasProps): DomEventHandlers => {
           }
 
           fn(raycastEvent)
-          // Event bubbling may me interrupted by stopPropagation, but that should only include
-          // events that aren't capturing, since these are in the middle of a gesture and should not
-          // be disturbed until they resolve.
-          if (localState.stopped === true) {
-            // Propagation is stopped, remove all other hover records
-            // An event handler is only allowed to flush other handlers if it is hovered itself
-            if (hovered.size && Array.from(hovered.values()).find((i) => i.object === hit.object)) {
-              handlePointerCancel(raycastEvent, [hit])
-            }
-            break
-          }
+
+          // Event bubbling may be interrupted by stopPropagation
+          if (localState.stopped === true) break
         }
       }
       return intersections
     },
+    // eslint-disable-next-line react-hooks/exhaustive-deps
     []
   )
 
-  const handlePointerMove = useCallback((event: DomEvent, prepare = true) => {
+  const handlePointerMove = React.useCallback((event: DomEvent, prepare = true) => {
     state.current.pointer.emit('pointerMove', event)
     if (prepare) prepareRay(event)
-    const hits = handleIntersects(
+    const hits = getIntersects(
       event,
-      (data: any) => {
-        const eventObject = data.eventObject
-        const handlers = (eventObject as any).__handlers
-        // Check presence of handlers
-        if (!handlers) return
-        // Call mouse move
-        if (handlers.pointerMove) handlers.pointerMove(data)
-        // Check if mouse enter or out is present
-        if (handlers.pointerOver || handlers.pointerEnter || handlers.pointerOut || handlers.pointerLeave) {
-          const id = makeId(data)
-          const hoveredItem = hovered.get(id)
-          if (!hoveredItem) {
-            // If the object wasn't previously hovered, book it and call its handler
-            hovered.set(id, data)
-            if (handlers.pointerOver) handlers.pointerOver({ ...data, type: 'pointerover' })
-            if (handlers.pointerEnter) handlers.pointerEnter({ ...data, type: 'pointerenter' })
-          } else if (hoveredItem.stopped) {
-            // If the object was previously hovered and stopped, we shouldn't allow other items to proceed
-            data.stopPropagation()
-          }
-        }
-      },
       // This is onPointerMove, we're only interested in events that exhibit this particular event
       (objects: any) =>
         objects.filter((obj: any) =>
           ['Move', 'Over', 'Enter', 'Out', 'Leave'].some((name) => (obj as any).__handlers['pointer' + name])
         )
     )
-    // Take care of unhover
-    handlePointerCancel(event, hits, prepare)
+
+    // Take care of un-hover
+    handlePointerCancel(event, hits)
+    handleIntersects(hits, event, (data: any) => {
+      const eventObject = data.eventObject
+      const handlers = (eventObject as any).__handlers
+      // Check presence of handlers
+      if (!handlers) return
+      // Check if mouse enter or out is present
+      if (handlers.pointerOver || handlers.pointerEnter || handlers.pointerOut || handlers.pointerLeave) {
+        const id = makeId(data)
+        const hoveredItem = hovered.get(id)
+        if (!hoveredItem) {
+          // If the object wasn't previously hovered, book it and call its handler
+          hovered.set(id, data)
+          if (handlers.pointerOver) handlers.pointerOver({ ...data, type: 'pointerover' })
+          if (handlers.pointerEnter) handlers.pointerEnter({ ...data, type: 'pointerenter' })
+        } else if (hoveredItem.stopped) {
+          // If the object was previously hovered and stopped, we shouldn't allow other items to proceed
+          data.stopPropagation()
+        }
+      }
+      // Call mouse move
+      if (handlers.pointerMove) handlers.pointerMove(data)
+    })
     return hits
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [])
 
-  const handlePointer = useCallback(
+  const handlePointer = React.useCallback(
     (name: string) => (event: DomEvent, prepare = true) => {
       state.current.pointer.emit(name, event)
       if (prepare) prepareRay(event)
-      const hits = handleIntersects(event, (data: any) => {
+      const hits = getIntersects(event)
+      handleIntersects(hits, event, (data: any) => {
         const eventObject = data.eventObject
         const handlers = (eventObject as any).__handlers
         if (handlers && handlers[name]) {
@@ -522,7 +536,7 @@ export const useCanvas = (props: UseCanvasProps): DomEventHandlers => {
       })
       // If a click yields no results, pass it back to the user as a miss
       if (name === 'pointerDown') {
-        state.current.initialClick = [event.clientX, event.clientY]
+        state.current.initialClick = [event.nativeEvent.offsetX, event.nativeEvent.offsetY]
         state.current.initialHits = hits.map((hit: any) => hit.eventObject)
       }
 
@@ -530,10 +544,10 @@ export const useCanvas = (props: UseCanvasProps): DomEventHandlers => {
         if (calculateDistance(event) <= 2) onPointerMissed()
       }
     },
-    [onPointerMissed]
+    [onPointerMissed, calculateDistance, getIntersects, handleIntersects, prepareRay]
   )
 
-  useMemo(() => {
+  React.useMemo(() => {
     state.current.events = {
       onClick: handlePointer('click'),
       onContextMenu: handlePointer('contextMenu'),
@@ -549,13 +563,13 @@ export const useCanvas = (props: UseCanvasProps): DomEventHandlers => {
       onGotPointerCaptureLegacy: (e: any) => (state.current.captured = intersect(e)),
       onLostPointerCapture: (e: any) => ((state.current.captured = undefined), handlePointerCancel(e)),
     }
-  }, [onPointerMissed])
+  }, [handlePointer, intersect, handlePointerCancel, handlePointerMove])
 
   /** Events ------------------------------------------------------------------------------------------------- */
 
   // Only trigger the context provider when necessary
-  const sharedState = useRef<SharedCanvasContext>()
-  useMemo(() => {
+  const sharedState = React.useRef<SharedCanvasContext>()
+  React.useMemo(() => {
     const {
       ready,
       manual,
@@ -570,10 +584,11 @@ export const useCanvas = (props: UseCanvasProps): DomEventHandlers => {
       ...props
     } = state.current
     sharedState.current = props
-  }, [size, defaultCam])
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [size, defaultCam]) // defaultCam is intentional
 
   // Update pixel ratio
-  useLayoutEffect(() => {
+  React.useLayoutEffect(() => {
     if (pixelRatio) {
       if (Array.isArray(pixelRatio))
         gl.setPixelRatio(Math.max(Math.min(pixelRatio[0], window.devicePixelRatio), pixelRatio[1]))
@@ -581,7 +596,7 @@ export const useCanvas = (props: UseCanvasProps): DomEventHandlers => {
     }
   }, [gl, pixelRatio])
   // Update shadow map
-  useLayoutEffect(() => {
+  React.useLayoutEffect(() => {
     if (shadowMap) {
       gl.shadowMap.enabled = true
       if (typeof shadowMap === 'object') Object.assign(gl.shadowMap, shadowMap)
@@ -591,24 +606,27 @@ export const useCanvas = (props: UseCanvasProps): DomEventHandlers => {
       gl.toneMapping = THREE.ACESFilmicToneMapping
       gl.outputEncoding = THREE.sRGBEncoding
     }
-  }, [shadowMap, colorManagement])
+  }, [shadowMap, colorManagement, gl])
 
   // This component is a bridge into the three render context, when it gets rendered
   // we know we are ready to compile shaders, call subscribers, etc
-  const Canvas = useCallback(function Canvas(props: { children: React.ReactElement }): JSX.Element {
-    const activate = () => setReady(true)
-
-    // eslint-disable-next-line react-hooks/rules-of-hooks
-    useEffect(() => {
-      const result = onCreated && onCreated(state.current)
-      return void (result && result.then ? result.then(activate) : activate())
-    }, [])
-
-    return props.children
-  }, [])
+  const Canvas = React.useCallback(
+    function Canvas(props: { children: React.ReactElement }): JSX.Element {
+      const activate = () => setReady(true)
+      React.useEffect(() => {
+        const result = onCreated && onCreated(state.current)
+        if (result && result.then) result.then(activate)
+        else activate()
+      }, [])
+      return props.children
+    },
+    // The Canvas component has to be static, it should not be re-created ever
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    []
+  )
 
   // Render v-dom into scene
-  useLayoutEffect(() => {
+  React.useLayoutEffect(() => {
     render(
       <Canvas>
         <stateContext.Provider value={sharedState.current as SharedCanvasContext}>
@@ -618,13 +636,14 @@ export const useCanvas = (props: UseCanvasProps): DomEventHandlers => {
       defaultScene,
       state
     )
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [ready, children, sharedState.current])
 
-  useLayoutEffect(() => {
+  React.useLayoutEffect(() => {
     if (ready) {
       // Start render-loop, either via RAF or setAnimationLoop for VR
       if (!state.current.vr) {
-        invalidate(state)
+        if (state.current.frames === 0) invalidate(state)
       } else if (((gl as any).xr || gl.vr) && gl.setAnimationLoop) {
         ;((gl as any).xr || gl.vr).enabled = true
         gl.setAnimationLoop((t: number) => renderGl(state, t, 0, true))
@@ -632,18 +651,17 @@ export const useCanvas = (props: UseCanvasProps): DomEventHandlers => {
         console.warn('the gl instance does not support VR!')
       }
     }
-  }, [ready, invalidateFrameloop])
+  }, [gl, ready, invalidateFrameloop])
 
   // Dispose renderer on unmount
-  useEffect(
+  React.useEffect(
     () => () => {
       if (state.current.gl) {
-        state.current.gl.renderLists.dispose()
+        if (state.current.gl.renderLists) state.current.gl.renderLists.dispose()
         if (state.current.gl.forceContextLoss) state.current.gl.forceContextLoss()
         dispose((state.current as any).gl)
       }
       unmountComponentAtNode(state.current.scene, () => {
-        dispose(state.current.scene)
         dispose(state.current.raycaster)
         dispose(state.current.camera)
         dispose(state.current)
@@ -655,7 +673,7 @@ export const useCanvas = (props: UseCanvasProps): DomEventHandlers => {
 }
 
 function dispose(obj: any) {
-  if (obj.dispose) obj.dispose()
+  if (obj.dispose && obj.type !== 'Scene') obj.dispose()
   for (const p in obj) {
     if (typeof p === 'object' && (p as any).dispose) (p as any).dispose()
     delete obj[p]
